@@ -1,6 +1,25 @@
 """
-Train linear probes on comma->number activations from the current .pt activation pipeline.
-Uses dataset-specific activations in `data/activations/<dataset>/model_layers_<L>_batch*.pt`.
+Linear Field Probing (LFP) on comma->number activations.
+
+In the paper's setup, each dataset corresponds to a different latent Gaussian mean
+(m300 ... m700), and activations at comma->number positions encode the model's
+current belief state over the next number token.
+
+This script trains a multiclass linear probe on those activations for one layer:
+each class is one dataset/mean condition, with sequence splits kept fixed
+(seq_0000..0007 train, seq_0008..0009 test). Early comma->number positions are
+dropped (`number_start_index`) to focus on the post-equilibration regime.
+
+The learned class weight vectors are then treated as a local linear field over
+belief states, following the LFP idea in the paper: many local linear readouts
+can approximate a curved manifold better than a single global direction.
+
+Saved outputs include probe weights/state_dict, train/test accuracy, per-dataset
+accuracy, and cosine-geometry diagnostics of class vectors (matrix, eigenvalues,
+and cumulative explained variance).
+
+Uses dataset-specific activations in
+`data/activations/<dataset>/model_layers_<L>_batch*.pt`.
 """
 
 from __future__ import annotations

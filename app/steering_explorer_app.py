@@ -1,9 +1,16 @@
 """
-Streamlit app for steering experiments.
-Based on the setup of "The Shapes of Beliefs"
-Allows to visualize the output distributions when steering \mu=300 activations towards \mu=700.
+Streamlit app for steering experiments from *The Shape of Beliefs* workflow.
+
+The app loads sequences from the m300 condition and compares base vs steered
+next-token distributions over the numeric token subset.
+
+Two steering modes are supported:
+- linear vector: steer along the global activation direction c700 - c300
+- geometry-aware manifold: steer along the centroid path across
+  m300..m700 using alpha-indexed interpolation
 
 Knobs are:
+- steering mode (linear vector vs geometry-aware manifold)
 - steering coefficient \alpha
 - layer(s) to apply steering
 - number of tokens to steer
@@ -16,6 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 import torch
@@ -25,6 +33,17 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B"
 
 DATASET_M300 = "gaussian_m300_s100_l1000_n10"
 DATASET_M700 = "gaussian_m700_s100_l1000_n10"
+DATASETS_MEAN_PATH = [
+    "gaussian_m300_s100_l1000_n10",
+    "gaussian_m350_s100_l1000_n10",
+    "gaussian_m400_s100_l1000_n10",
+    "gaussian_m450_s100_l1000_n10",
+    "gaussian_m500_s100_l1000_n10",
+    "gaussian_m550_s100_l1000_n10",
+    "gaussian_m600_s100_l1000_n10",
+    "gaussian_m650_s100_l1000_n10",
+    "gaussian_m700_s100_l1000_n10",
+]
 
 LAST_N_COM2NUM = 500
 TEMPERATURE = 1.0
@@ -35,6 +54,9 @@ ACTIVS_DIR = BASE_DIR / "data" / "activations"
 TOKEN_SUBSET_PATH = BASE_DIR / "token_subset" / "llama3-2-1B_number_tokens.json"
 
 MAX_ALPHA = 3.0
+
+LINEAR_MODE = "linear vector (m300→m700)"
+GEOMETRY_MODE = "geometry-aware manifold"
 
 
 @st.cache_resource
@@ -105,6 +127,20 @@ def compute_centroid(dataset_name: str, last_n: int, layer: int) -> torch.Tensor
     if total is None or count == 0:
         raise ValueError(f"No activations found for {dataset_name}")
     return total / count
+
+
+@st.cache_data
+def compute_centroid_path(last_n: int, layer: int) -> torch.Tensor:
+    centroids = [compute_centroid(ds, last_n, layer) for ds in DATASETS_MEAN_PATH]
+    return torch.stack(centroids, dim=0)  # [num_datasets, d_model]
+
+
+def spline_target_from_centroids(centroid_path: torch.Tensor, alpha: float) -> torch.Tensor:
+    """Linear interpolation over ordered centroids (same recipe as steering notebooks/scripts)."""
+    u = alpha * (centroid_path.size(0) - 1)
+    i = int(np.clip(np.floor(u), 0, centroid_path.size(0) - 2))
+    f = u - i
+    return (1.0 - f) * centroid_path[i] + f * centroid_path[i + 1]
 
 
 def run_model_with_steering(
@@ -188,6 +224,8 @@ def main():
         st.session_state.layers = [15]
     if "layers_prev" not in st.session_state:
         st.session_state.layers_prev = st.session_state.layers
+    if "steering_mode_prev" not in st.session_state:
+        st.session_state.steering_mode_prev = LINEAR_MODE
 
     seq_index = st.selectbox("Sequence index", options=list(range(10)), index=0)
     sequence_text = load_sequence_text(DATASET_M300, int(seq_index))
@@ -212,16 +250,47 @@ def main():
         st.session_state.alpha_points = []
         st.session_state.layers_prev = st.session_state.layers
 
+    steering_mode = st.radio(
+        "Steering mode",
+        options=[LINEAR_MODE, GEOMETRY_MODE],
+        horizontal=True,
+    )
+    if steering_mode != st.session_state.steering_mode_prev:
+        st.session_state.alpha_points = []
+        st.session_state.steering_mode_prev = steering_mode
+
+    if steering_mode == GEOMETRY_MODE:
+        alpha = st.slider(
+            "alpha (steering strength)",
+            min_value=0.0,
+            max_value=1.1,
+            value=0.6,
+            step=0.1,
+        )
+    else:
+        alpha = st.slider(
+            "alpha (steering strength)",
+            min_value=-MAX_ALPHA,
+            max_value=MAX_ALPHA,
+            value=0.0,
+            step=0.1,
+        )
     token_strings, token_ids = load_token_subset()
 
-    with st.spinner("Computing steering vector from activations..."):
+    with st.spinner("Computing steering direction(s) from activations..."):
         steering_vecs = {}
         for layer in st.session_state.layers:
             centroid_300 = compute_centroid(DATASET_M300, LAST_N_COM2NUM, layer)
-            centroid_700 = compute_centroid(DATASET_M700, LAST_N_COM2NUM, layer)
-            steering_vecs[layer] = (centroid_700 - centroid_300).to(dtype=torch.float32)
+            if steering_mode == GEOMETRY_MODE:
+                centroid_path = compute_centroid_path(LAST_N_COM2NUM, layer)
+                target = spline_target_from_centroids(centroid_path, alpha)
+                # run_model_with_steering applies alpha * vec in the hook.
+                # Keeping vec=(target-c300) matches the reference notebook/script recipe.
+                steering_vecs[layer] = (target - centroid_300).to(dtype=torch.float32)
+            else:
+                centroid_700 = compute_centroid(DATASET_M700, LAST_N_COM2NUM, layer)
+                steering_vecs[layer] = (centroid_700 - centroid_300).to(dtype=torch.float32)
 
-    alpha = st.slider("alpha (steering strength)", min_value=-MAX_ALPHA, max_value=MAX_ALPHA, value=0.0, step=0.1)
     last_n_tokens = st.slider("steer last n tokens", min_value=1, max_value=100, value=1, step=1)
 
     average_all = st.checkbox("Average over all sequences", value=False)
@@ -285,7 +354,7 @@ def main():
             y=steered_pdf,
             mode="lines",
             line=dict(color="#EF4444", width=1.5),
-            name=f"steered (alpha={alpha:.1f})",
+            name=f"steered [{steering_mode}] (alpha={alpha:.1f})",
         )
     )
 
@@ -317,6 +386,9 @@ def main():
     alphas = [p[0] for p in points]
     means = [p[1] for p in points]
     stds = [p[2] for p in points]
+    color_min, color_max = (
+        (0.0, 1.1) if steering_mode == GEOMETRY_MODE else (-MAX_ALPHA, MAX_ALPHA)
+    )
 
     fig2 = go.Figure()
     fig2.add_trace(
@@ -328,12 +400,12 @@ def main():
                 size=10,
                 color=alphas,
                 colorscale="Portland",
-                cmin=-MAX_ALPHA,
-                cmax=MAX_ALPHA,
+                cmin=color_min,
+                cmax=color_max,
                 showscale=True,
                 colorbar=dict(title="alpha"),
             ),
-            name="steered points",
+            name=f"steered points [{steering_mode}]",
         )
     )
     fig2.update_layout(
