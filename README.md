@@ -18,7 +18,7 @@ Code and artifacts for the Goodfire research paper *The Shape of Beliefs: Geomet
 
 ## Workflow
 
-1. Generate data (sequences, activations, logits):
+1. Generate data (sequences, activations, logits; about 50GB):
    ```bash
    chmod +x scripts/generate_all.sh
    ./scripts/generate_all.sh
@@ -28,7 +28,7 @@ Code and artifacts for the Goodfire research paper *The Shape of Beliefs: Geomet
 
 3. Visualize different steering schemes interactively from the streamlit app:
    ```bash
-   uv run streamlit run steering_explorer_app.py
+   uv run streamlit run app/steering_explorer_app.py
    ```
 
 ### Citation

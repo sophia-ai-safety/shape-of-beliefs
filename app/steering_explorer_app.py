@@ -9,7 +9,7 @@ Knobs are:
 - number of tokens to steer
 
 Run:
-    uv run streamlit run steering_explorer_app.py
+    uv run streamlit run app/steering_explorer_app.py
 """
 
 from __future__ import annotations

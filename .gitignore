@@ -14,3 +14,5 @@ wheels/
 *.html
 *.png
 *.pdf
+
+tmp/
